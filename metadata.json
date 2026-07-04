@@ -1,0 +1,6 @@
+{
+  "name": "Scrip Interceptor",
+  "description": "Intercepts shared Moneycontrol articles, parses Indian stock scrips, and organizes them into watchlists.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

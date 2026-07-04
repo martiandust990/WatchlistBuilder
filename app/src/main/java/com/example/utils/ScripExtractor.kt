@@ -433,16 +433,79 @@ object ScripExtractor {
     }
 
     /**
-     * Strictly validates if the URL originates from moneycontrol.com
+     * Strictly validates if the URL originates from any supported source:
+     * Moneycontrol, The Mint (livemint.com), Economic Times (economictimes.com), Business Line (thehindubusinessline.com)
      */
-    fun isValidMoneycontrolUrl(urlString: String): Boolean {
+    fun isValidSourceUrl(urlString: String): Boolean {
         return try {
             val url = URL(urlString)
             val host = url.host.lowercase()
-            host == "moneycontrol.com" || host.endsWith(".moneycontrol.com")
+            host == "moneycontrol.com" || host.endsWith(".moneycontrol.com") ||
+                    host == "livemint.com" || host.endsWith(".livemint.com") ||
+                    host == "economictimes.com" || host.endsWith(".economictimes.com") ||
+                    host == "indiatimes.com" || host.endsWith(".indiatimes.com") ||
+                    host == "thehindubusinessline.com" || host.endsWith(".thehindubusinessline.com")
         } catch (e: Exception) {
             false
         }
+    }
+
+    fun isValidMoneycontrolUrl(urlString: String): Boolean {
+        return isValidSourceUrl(urlString)
+    }
+
+    /**
+     * Automatically suggests an elegant, relevant watchlist name (within 15 characters)
+     * based on either the shared article url keywords or the current month/date.
+     */
+    fun suggestWatchlistName(url: String? = null): String {
+        if (!url.isNullOrEmpty()) {
+            try {
+                val uri = java.net.URI(url)
+                val path = uri.path ?: ""
+                val segments = path.split('/', '-', '_', '.')
+                    .map { it.lowercase().trim() }
+                    .filter {
+                        it.isNotEmpty() &&
+                        it != "news" &&
+                        it != "business" &&
+                        it != "stocks" &&
+                        it != "market" &&
+                        it != "markets" &&
+                        it != "articleshow" &&
+                        it != "today" &&
+                        it != "live" &&
+                        it != "updates" &&
+                        it != "share" &&
+                        it != "price" &&
+                        it != "html" &&
+                        it != "htm" &&
+                        it != "cms" &&
+                        it != "amp" &&
+                        !it.all { char -> char.isDigit() } &&
+                        it.length >= 3
+                    }
+                if (segments.isNotEmpty()) {
+                    val word1 = segments[0].replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.ROOT) else it.toString() }
+                    val word2 = if (segments.size > 1) segments[1].replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.ROOT) else it.toString() } else ""
+                    val candidate = if (word2.isNotEmpty() && (word1.length + word2.length + 1) <= 15) {
+                        "$word1 $word2"
+                    } else {
+                        word1
+                    }
+                    if (candidate.length in 3..15) {
+                        return candidate
+                    } else if (candidate.length > 15) {
+                        return candidate.take(15).trim()
+                    }
+                }
+            } catch (e: Exception) {
+                // fall through
+            }
+        }
+        val sdf = java.text.SimpleDateFormat("MMM dd", java.util.Locale.US)
+        val formattedDate = sdf.format(java.util.Calendar.getInstance().time)
+        return "$formattedDate Picks"
     }
 
     /**
@@ -513,15 +576,113 @@ object ScripExtractor {
                 titleText = doc.select("h1").firstOrNull()?.text() ?: ""
             }
 
-            // 2. Extract and Clean Main Content Block
+            // 2. Identify Host and Setup Target Selectors
+            var bodySelector = ""
+            try {
+                val url = java.net.URL(urlString)
+                val host = url.host.lowercase()
+                if (host.contains("moneycontrol.com")) {
+                    bodySelector = "div.arti-flow, div.content_wrapper, div.news_post, #article-body"
+                } else if (host.contains("livemint.com")) {
+                    bodySelector = "div.storyPage, div.story-text, .storyParagraph, #storyArea"
+                } else if (host.contains("economictimes.com") || host.contains("indiatimes.com")) {
+                    bodySelector = "div.artText, div.article_content, div.paywall"
+                } else if (host.contains("thehindubusinessline.com")) {
+                    bodySelector = "div.story-text, div.content-body, div.article-text, div.story-content, .article_body"
+                }
+            } catch (e: Exception) {
+                // Ignore parsing errors, fallback to default selectors
+            }
+
+            // 3. Extract and Filter Main Content Block
             var bodyText = ""
-            // Prioritize more specific containers (like .arti-flow, #article-body) first
-            val bodySelector = "div.arti-flow, div.news_post, #article-body, article, div.content_wrapper, div.content, #content"
-            val selectedElement = doc.select(bodySelector).firstOrNull()
-            
-            if (selectedElement != null) {
-                val cleanElement = selectedElement.clone()
-                // Extensively and recursively strip sidebars, tickers, widgets, and tables containing unrelated links/stats
+            val selectedElement = if (bodySelector.isNotEmpty()) {
+                doc.select(bodySelector).firstOrNull()
+            } else {
+                null
+            }
+
+            val contentSource = selectedElement ?: doc.body()
+            if (contentSource != null) {
+                // Extract all paragraph tags inside the content source
+                val paragraphs = contentSource.select("p")
+                val cleanParagraphs = mutableListOf<String>()
+
+                for (p in paragraphs) {
+                    var isUnwanted = false
+                    
+                    // First check the <p> element itself
+                    val pClass = p.className().lowercase()
+                    val pId = p.id().lowercase()
+                    if (pClass.contains("sidebar") || pId.contains("sidebar") ||
+                        pClass.contains("widget") || pId.contains("widget") ||
+                        pClass.contains("trending") || pId.contains("trending") ||
+                        pClass.contains("related") || pId.contains("related") ||
+                        pClass.contains("recom") || pId.contains("recom") ||
+                        pClass.contains("popular") || pId.contains("popular") ||
+                        pClass.contains("latest") || pId.contains("latest") ||
+                        pClass.contains("newsletter") || pId.contains("newsletter") ||
+                        pClass.contains("comment") || pId.contains("comment") ||
+                        pClass.contains("social") || pClass.contains("share") ||
+                        pClass.contains("ad-") || pClass.contains("ad_") ||
+                        pClass.contains("advertisement") || pClass.contains("promo") ||
+                        pClass.contains("ticker") || pClass.contains("most-active") ||
+                        pClass.contains("market-map") || pClass.contains("market_")
+                    ) {
+                        isUnwanted = true
+                    }
+
+                    if (!isUnwanted) {
+                        // Backtrack up the tree to verify if the paragraph resides inside standard noise containers
+                        val parents = p.parents()
+                    for (parent in parents) {
+                        val tag = parent.tagName().lowercase()
+                        val parentClass = parent.className().lowercase()
+                        val parentId = parent.id().lowercase()
+
+                        if (tag == "aside" || tag == "header" || tag == "footer" || tag == "nav" || tag == "table") {
+                            isUnwanted = true
+                            break
+                        }
+
+                        if (parentClass.contains("sidebar") || parentId.contains("sidebar") ||
+                            parentClass.contains("widget") || parentId.contains("widget") ||
+                            parentClass.contains("trending") || parentId.contains("trending") ||
+                            parentClass.contains("related") || parentId.contains("related") ||
+                            parentClass.contains("recom") || parentId.contains("recom") ||
+                            parentClass.contains("popular") || parentId.contains("popular") ||
+                            parentClass.contains("latest") || parentId.contains("latest") ||
+                            parentClass.contains("newsletter") || parentId.contains("newsletter") ||
+                            parentClass.contains("comment") || parentId.contains("comment") ||
+                            parentClass.contains("footer") || parentId.contains("footer") ||
+                            parentClass.contains("header") || parentId.contains("header") ||
+                            parentClass.contains("nav") || parentId.contains("nav") ||
+                            parentClass.contains("social") || parentClass.contains("share") ||
+                            parentClass.contains("ad-") || parentClass.contains("ad_") ||
+                            parentClass.contains("advertisement") || parentClass.contains("promo") ||
+                            parentClass.contains("ticker") || parentClass.contains("most-active") ||
+                            parentClass.contains("market-map") || parentClass.contains("market_")
+                        ) {
+                            isUnwanted = true
+                            break
+                        }
+                    }
+                    }
+
+                    if (!isUnwanted) {
+                        val txt = p.text().trim()
+                        if (txt.isNotEmpty()) {
+                            cleanParagraphs.add(txt)
+                        }
+                    }
+                }
+
+                bodyText = cleanParagraphs.joinToString("\n\n")
+            }
+
+            // If paragraph-based extraction returned little to no text, fall back to standard cleaned container extraction
+            if (bodyText.length < 100 && contentSource != null) {
+                val cleanElement = contentSource.clone()
                 val selectorsToRemove = listOf(
                     "aside", "header", "footer", "nav", "table", "iframe", "noscript", "script", "style",
                     "div.header", "div.footer", "div.nav", "div.menu", "div.top-bar", "div.navigation",
@@ -543,34 +704,6 @@ object ScripExtractor {
                     cleanElement.select(selector).remove()
                 }
                 bodyText = cleanElement.text()
-            }
-            if (bodyText.isEmpty()) {
-                val cleanBody = doc.body()?.clone()
-                if (cleanBody != null) {
-                    val selectorsToRemove = listOf(
-                        "aside", "header", "footer", "nav", "table", "iframe", "noscript", "script", "style",
-                        "div.header", "div.footer", "div.nav", "div.menu", "div.top-bar", "div.navigation",
-                        "[class*=sidebar]", "[id*=sidebar]",
-                        "[class*=right-col]", "[class*=right_col]", "[id*=right-col]", "[id*=right_col]",
-                        "[class*=trending]", "[id*=trending]",
-                        "[class*=ticker]", "[id*=ticker]",
-                        "[class*=widget]", "[id*=widget]",
-                        "[class*=promo]", "[id*=promo]",
-                        "[class*=related]", "[id*=related]",
-                        "[class*=social]", "[id*=social]",
-                        "[class*=share]", "[id*=share]",
-                        "[class*=newsletter]", "[class*=subscribe]",
-                        "[class*=ad-]", "[class*=ad_]", "[id*=ad-]", "[id*=ad_]", "[class*=advertisement]",
-                        "[class*=most-active]", "[class*=market-map]", "[class*=market_]",
-                        "div.tags-list", "div.author-info", "div.comment-box", "div.comments"
-                    )
-                    for (selector in selectorsToRemove) {
-                        cleanBody.select(selector).remove()
-                    }
-                    bodyText = cleanBody.text()
-                } else {
-                    bodyText = doc.body()?.text() ?: ""
-                }
             }
 
             // Combine Title and clean Body Text

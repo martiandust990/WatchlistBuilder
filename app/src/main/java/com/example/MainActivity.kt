@@ -47,6 +47,9 @@ import com.example.ui.theme.MyApplicationTheme
 import com.example.utils.ScripExtractor
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.PickVisualMediaRequest
 
 // ViewModel for managing Watchlist dashboard state
 class MainViewModel(private val repository: WatchlistRepository) : ViewModel() {
@@ -185,6 +188,48 @@ fun DashboardScreen(
     var showManualAddScripDialog by remember { mutableStateOf(false) }
     var manualScripName by remember { mutableStateOf("") }
 
+    // OCR states for screenshot scanning
+    var showOcrDialog by remember { mutableStateOf(false) }
+    var isOcrLoading by remember { mutableStateOf(false) }
+    var ocrExtractedScrips by remember { mutableStateOf<List<String>>(emptyList()) }
+    var ocrSelectedScrips by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    val pickMedia = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+        onResult = { uri ->
+            if (uri != null) {
+                isOcrLoading = true
+                showOcrDialog = true
+                ocrExtractedScrips = emptyList()
+                ocrSelectedScrips = emptySet()
+                
+                val recognizer = com.google.mlkit.vision.text.TextRecognition.getClient(
+                    com.google.mlkit.vision.text.latin.TextRecognizerOptions.DEFAULT_OPTIONS
+                )
+                try {
+                    val inputImage = com.google.mlkit.vision.common.InputImage.fromFilePath(context, uri)
+                    recognizer.process(inputImage)
+                        .addOnSuccessListener { visionText ->
+                            val text = visionText.text
+                            val detected = ScripExtractor.extractScripsFromText(text)
+                            ocrExtractedScrips = detected
+                            ocrSelectedScrips = detected.toSet()
+                            isOcrLoading = false
+                        }
+                        .addOnFailureListener { e ->
+                            isOcrLoading = false
+                            Toast.makeText(context, "Scanning failed: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                            showOcrDialog = false
+                        }
+                } catch (e: Exception) {
+                    isOcrLoading = false
+                    Toast.makeText(context, "Error loading image: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                    showOcrDialog = false
+                }
+            }
+        }
+    )
+
     // Sync selected watchlist on initial load
     LaunchedEffect(watchlists) {
         if (selectedWatchlist == null && watchlists.isNotEmpty()) {
@@ -219,7 +264,10 @@ fun DashboardScreen(
                 )
 
                 IconButton(
-                    onClick = { showAddWatchlistDialog = true },
+                    onClick = { 
+                        newWatchlistName = ScripExtractor.suggestWatchlistName(null)
+                        showAddWatchlistDialog = true 
+                    },
                     modifier = Modifier.testTag("add_watchlist_fab")
                 ) {
                     Icon(Icons.Default.AddCircle, contentDescription = "Create Watchlist", tint = MaterialTheme.colorScheme.primary)
@@ -305,16 +353,35 @@ fun DashboardScreen(
                         )
                     }
 
-                    Button(
-                        onClick = { showManualAddScripDialog = true },
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        modifier = Modifier
-                            .height(36.dp)
-                            .testTag("manual_add_scrip_button")
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Default.Add, contentDescription = "Add scrip", modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Add Stock", fontSize = 12.sp)
+                        FilledTonalButton(
+                            onClick = {
+                                pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                            },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier
+                                .height(36.dp)
+                                .testTag("scan_screenshot_button")
+                        ) {
+                            Icon(Icons.Default.DocumentScanner, contentDescription = "Scan Screenshot", modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Scan Screen", fontSize = 12.sp)
+                        }
+
+                        Button(
+                            onClick = { showManualAddScripDialog = true },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier
+                                .height(36.dp)
+                                .testTag("manual_add_scrip_button")
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = "Add scrip", modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Add Stock", fontSize = 12.sp)
+                        }
                     }
                 }
             }
@@ -682,6 +749,176 @@ fun DashboardScreen(
                     }
                 ) {
                     Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showOcrDialog) {
+        AlertDialog(
+            onDismissRequest = { showOcrDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.DocumentScanner,
+                        contentDescription = "OCR Scan",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(28.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Screenshot Scanner", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 300.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isOcrLoading) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                            modifier = Modifier.padding(16.dp)
+                        ) {
+                            CircularProgressIndicator()
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text("Analyzing screenshot...", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    } else {
+                        if (ocrExtractedScrips.isEmpty()) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center,
+                                modifier = Modifier.padding(16.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.SearchOff,
+                                    contentDescription = "No Stocks Found",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                    modifier = Modifier.size(48.dp)
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text(
+                                    "No Indian market scrips detected in this screenshot.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        } else {
+                            Column {
+                                Text(
+                                    text = "Select the scrips you want to add to your current active watchlist:",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(bottom = 12.dp)
+                                )
+                                
+                                LazyColumn(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(
+                                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                                            RoundedCornerShape(12.dp)
+                                        )
+                                        .padding(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    items(ocrExtractedScrips) { scrip ->
+                                        val isChecked = ocrSelectedScrips.contains(scrip)
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .clickable {
+                                                    ocrSelectedScrips = if (isChecked) {
+                                                        ocrSelectedScrips - scrip
+                                                    } else {
+                                                        ocrSelectedScrips + scrip
+                                                    }
+                                                }
+                                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Checkbox(
+                                                checked = isChecked,
+                                                onCheckedChange = { checked ->
+                                                    ocrSelectedScrips = if (checked == true) {
+                                                        ocrSelectedScrips + scrip
+                                                    } else {
+                                                        ocrSelectedScrips - scrip
+                                                    }
+                                                }
+                                            )
+                                            Spacer(modifier = Modifier.width(12.dp))
+                                            Text(
+                                                text = scrip,
+                                                style = MaterialTheme.typography.bodyLarge,
+                                                fontWeight = FontWeight.SemiBold,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            val category = ScripExtractor.getScripCategory(scrip)
+                                            Box(
+                                                modifier = Modifier
+                                                    .background(
+                                                        when (category) {
+                                                            "Derivative" -> MaterialTheme.colorScheme.tertiaryContainer
+                                                            "Commodity" -> Color(0xFFFFE082)
+                                                            else -> MaterialTheme.colorScheme.secondaryContainer
+                                                        },
+                                                        RoundedCornerShape(4.dp)
+                                                    )
+                                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                            ) {
+                                                Text(
+                                                    text = category,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = when (category) {
+                                                        "Derivative" -> MaterialTheme.colorScheme.onTertiaryContainer
+                                                        "Commodity" -> Color(0xFF5D4037)
+                                                        else -> MaterialTheme.colorScheme.onSecondaryContainer
+                                                    },
+                                                    fontSize = 8.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                if (!isOcrLoading && ocrExtractedScrips.isNotEmpty()) {
+                    Button(
+                        onClick = {
+                            if (ocrSelectedScrips.isEmpty()) {
+                                Toast.makeText(context, "Please select at least one scrip!", Toast.LENGTH_SHORT).show()
+                                return@Button
+                            }
+                            selectedWatchlist?.let { wl ->
+                                ocrSelectedScrips.forEach { scrip ->
+                                    viewModel.addScrip(wl.id, scrip)
+                                }
+                                Toast.makeText(context, "Added ${ocrSelectedScrips.size} scrips to ${wl.name}!", Toast.LENGTH_SHORT).show()
+                            }
+                            showOcrDialog = false
+                        },
+                        modifier = Modifier.testTag("ocr_confirm_button")
+                    ) {
+                        Text("Add Selected")
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showOcrDialog = false }
+                ) {
+                    Text(if (!isOcrLoading && ocrExtractedScrips.isNotEmpty()) "Cancel" else "Dismiss")
                 }
             }
         )

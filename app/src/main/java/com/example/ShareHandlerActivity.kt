@@ -40,6 +40,10 @@ import com.example.ui.theme.MyApplicationTheme
 import com.example.utils.ScripExtractor
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import android.net.Uri
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 
 class ShareHandlerActivity : ComponentActivity() {
 
@@ -53,25 +57,36 @@ class ShareHandlerActivity : ComponentActivity() {
         repository = WatchlistRepository(database.watchlistDao())
 
         // Extract and validate share payload
-        val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
-        val url = ScripExtractor.extractUrl(sharedText)
-
-        if (url == null) {
-            Toast.makeText(this, "No valid link found in shared content!", Toast.LENGTH_LONG).show()
-            finish()
-            return
+        var imageUri: Uri? = null
+        if (Intent.ACTION_SEND == intent.action && intent.type?.startsWith("image/") == true) {
+            imageUri = intent.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
         }
 
-        if (!ScripExtractor.isValidMoneycontrolUrl(url)) {
-            Toast.makeText(this, "Invalid source! Only moneycontrol.com links are supported.", Toast.LENGTH_LONG).show()
-            finish()
-            return
+        val url: String?
+        if (imageUri == null) {
+            val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
+            url = ScripExtractor.extractUrl(sharedText)
+
+            if (url == null) {
+                Toast.makeText(this, "No valid link found in shared content!", Toast.LENGTH_LONG).show()
+                finish()
+                return
+            }
+
+            if (!ScripExtractor.isValidSourceUrl(url)) {
+                Toast.makeText(this, "Invalid source! Supported: Moneycontrol, Livemint, Economic Times, Business Line.", Toast.LENGTH_LONG).show()
+                finish()
+                return
+            }
+        } else {
+            url = null
         }
 
         setContent {
             MyApplicationTheme {
                 ShareOverlayScreen(
                     url = url,
+                    imageUri = imageUri,
                     onDismiss = { finish() },
                     onAddComplete = { watchlistName, scripsAdded ->
                         Toast.makeText(
@@ -89,7 +104,8 @@ class ShareHandlerActivity : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     fun ShareOverlayScreen(
-        url: String,
+        url: String?,
+        imageUri: Uri?,
         onDismiss: () -> Unit,
         onAddComplete: (watchlistName: String, scrips: List<String>) -> Unit
     ) {
@@ -102,18 +118,44 @@ class ShareHandlerActivity : ComponentActivity() {
         var isCreatingNewWatchlist by remember { mutableStateOf(false) }
         var newWatchlistName by remember { mutableStateOf("") }
 
-        // Load data and scrape URL
-        LaunchedEffect(url) {
+        // Load data and scrape URL or scan image
+        LaunchedEffect(url, imageUri) {
             // Load watchlists
             watchlists = repository.allWatchlists.first()
             if (watchlists.isNotEmpty()) {
                 selectedWatchlist = watchlists.first()
             }
 
-            // Scrape scrips
-            extractedScrips = ScripExtractor.extractScripsFromUrl(url)
-            selectedScrips = extractedScrips.toSet() // Pre-select all extracted scrips
-            isLoading = false
+            if (imageUri != null) {
+                isLoading = true
+                val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                try {
+                    val inputImage = InputImage.fromFilePath(applicationContext, imageUri)
+                    recognizer.process(inputImage)
+                        .addOnSuccessListener { visionText ->
+                            val detected = ScripExtractor.extractScripsFromText(visionText.text)
+                            extractedScrips = detected
+                            selectedScrips = detected.toSet()
+                            isLoading = false
+                        }
+                        .addOnFailureListener { e ->
+                            isLoading = false
+                            Toast.makeText(this@ShareHandlerActivity, "Screenshot scan failed: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                            onDismiss()
+                        }
+                } catch (e: Exception) {
+                    isLoading = false
+                    Toast.makeText(this@ShareHandlerActivity, "Failed to load image: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                    onDismiss()
+                }
+            } else if (url != null) {
+                // Scrape scrips
+                extractedScrips = ScripExtractor.extractScripsFromUrl(url)
+                selectedScrips = extractedScrips.toSet() // Pre-select all extracted scrips
+                isLoading = false
+            } else {
+                isLoading = false
+            }
         }
 
         Box(
@@ -163,14 +205,14 @@ class ShareHandlerActivity : ComponentActivity() {
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(
-                                    imageVector = Icons.Default.Analytics,
-                                    contentDescription = "Analytics",
+                                    imageVector = if (imageUri != null) Icons.Default.DocumentScanner else Icons.Default.Analytics,
+                                    contentDescription = "Analysis",
                                     tint = MaterialTheme.colorScheme.primary,
                                     modifier = Modifier.size(24.dp)
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = "Scrip Detector",
+                                    text = if (imageUri != null) "Screenshot Scanner" else "Scrip Detector",
                                     style = MaterialTheme.typography.titleLarge,
                                     fontWeight = FontWeight.Bold
                                 )
@@ -182,7 +224,7 @@ class ShareHandlerActivity : ComponentActivity() {
 
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "URL: $url",
+                            text = if (imageUri != null) "Source: Shared Screenshot Image" else "URL: $url",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -201,7 +243,7 @@ class ShareHandlerActivity : ComponentActivity() {
                                 CircularProgressIndicator()
                                 Spacer(modifier = Modifier.height(16.dp))
                                 Text(
-                                    text = "Analyzing article content...",
+                                    text = if (imageUri != null) "Scanning screenshot text..." else "Analyzing article content...",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -409,6 +451,7 @@ class ShareHandlerActivity : ComponentActivity() {
                                                     },
                                                     onClick = {
                                                         isCreatingNewWatchlist = true
+                                                        newWatchlistName = ScripExtractor.suggestWatchlistName(url)
                                                         isDropdownExpanded = false
                                                     }
                                                 )

@@ -52,6 +52,9 @@ interface WatchlistDao {
     @Query("DELETE FROM scrips WHERE id = :id")
     suspend fun deleteScrip(id: Int)
 
+    @Query("DELETE FROM scrips WHERE watchlistId = :watchlistId AND scripName = :scripName")
+    suspend fun deleteScripsByName(watchlistId: Int, scripName: String)
+
     @Query("SELECT COUNT(*) FROM watchlists")
     suspend fun getWatchlistCount(): Int
 }

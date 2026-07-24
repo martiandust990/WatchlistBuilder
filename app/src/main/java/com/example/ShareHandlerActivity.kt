@@ -28,6 +28,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -41,6 +42,11 @@ import com.example.utils.ScripExtractor
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import android.net.Uri
+import androidx.compose.foundation.Image
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.animation.core.*
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -51,6 +57,11 @@ class ShareHandlerActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Pre-warm ScripExtractor maps in background for instantaneous scanning
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.Default) {
+            ScripExtractor.preWarm()
+        }
 
         // Initialize Repository
         val database = AppDatabase.getDatabase(applicationContext)
@@ -240,8 +251,32 @@ class ShareHandlerActivity : ComponentActivity() {
                                     .padding(vertical = 40.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                CircularProgressIndicator()
-                                Spacer(modifier = Modifier.height(16.dp))
+                                val infiniteTransition = rememberInfiniteTransition(label = "share_logo_scale")
+                                val scale by infiniteTransition.animateFloat(
+                                    initialValue = 0.9f,
+                                    targetValue = 1.1f,
+                                    animationSpec = infiniteRepeatable(
+                                        animation = tween(1000, easing = FastOutSlowInEasing),
+                                        repeatMode = RepeatMode.Reverse
+                                    ),
+                                    label = "scale"
+                                )
+                                Image(
+                                    painter = painterResource(id = R.drawable.img_app_logo),
+                                    contentDescription = "Analyzing...",
+                                    modifier = Modifier
+                                        .size(80.dp)
+                                        .graphicsLayer(scaleX = scale, scaleY = scale)
+                                        .clip(RoundedCornerShape(16.dp)),
+                                    contentScale = ContentScale.Crop
+                                )
+                                Spacer(modifier = Modifier.height(20.dp))
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(24.dp),
+                                    strokeWidth = 3.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
                                 Text(
                                     text = if (imageUri != null) "Scanning screenshot text..." else "Analyzing article content...",
                                     style = MaterialTheme.typography.bodyMedium,
@@ -334,11 +369,27 @@ class ShareHandlerActivity : ComponentActivity() {
                                                     horizontalArrangement = Arrangement.SpaceBetween,
                                                     verticalAlignment = Alignment.CenterVertically
                                                 ) {
-                                                    Text(
-                                                        text = scrip,
-                                                        style = MaterialTheme.typography.bodyLarge,
-                                                        fontWeight = FontWeight.SemiBold
-                                                    )
+                                                    val stockInfo = ScripExtractor.findStockBySymbol(scrip)
+                                                    Column(
+                                                        modifier = Modifier.weight(1f),
+                                                        verticalArrangement = Arrangement.Center
+                                                    ) {
+                                                        Text(
+                                                            text = scrip,
+                                                            style = MaterialTheme.typography.bodyLarge,
+                                                            fontWeight = FontWeight.SemiBold
+                                                        )
+                                                        if (stockInfo != null) {
+                                                            Text(
+                                                                text = stockInfo.companyName,
+                                                                style = MaterialTheme.typography.bodySmall,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                                                maxLines = 1,
+                                                                overflow = TextOverflow.Ellipsis
+                                                             )
+                                                        }
+                                                    }
+                                                    Spacer(modifier = Modifier.width(8.dp))
                                                     val category = ScripExtractor.getScripCategory(scrip)
                                                     Box(
                                                         modifier = Modifier

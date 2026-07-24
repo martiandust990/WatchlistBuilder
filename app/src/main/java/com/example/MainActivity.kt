@@ -12,7 +12,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -47,9 +51,16 @@ import com.example.ui.theme.MyApplicationTheme
 import com.example.utils.ScripExtractor
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import androidx.lifecycle.lifecycleScope
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.PickVisualMediaRequest
+import androidx.compose.foundation.Image
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.animation.core.*
 
 // ViewModel for managing Watchlist dashboard state
 class MainViewModel(private val repository: WatchlistRepository) : ViewModel() {
@@ -112,18 +123,46 @@ class MainViewModel(private val repository: WatchlistRepository) : ViewModel() {
         }
     }
 
+    fun deleteScripByName(watchlistId: Int, scripName: String) {
+        kotlinx.coroutines.MainScope().launch {
+            repository.deleteScripsByName(watchlistId, scripName)
+        }
+    }
+
     fun addScrip(watchlistId: Int, scripName: String) {
         kotlinx.coroutines.MainScope().launch {
             repository.addScrip(watchlistId, scripName)
         }
     }
+
+    fun swapScrips(scrip1: ScripEntity, scrip2: ScripEntity) {
+        kotlinx.coroutines.MainScope().launch {
+            val t1 = scrip1.addedAt
+            val t2 = scrip2.addedAt
+            val newT1 = if (t1 == t2) t2 + 1 else t2
+            val newT2 = if (t1 == t2) t1 - 1 else t1
+            repository.updateScrip(scrip1.copy(addedAt = newT1))
+            repository.updateScrip(scrip2.copy(addedAt = newT2))
+        }
+    }
 }
+
+data class GroupedScrip(
+    val scripName: String,
+    val primaryScrip: ScripEntity,
+    val count: Int
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Pre-warm ScripExtractor maps in background for instantaneous scanning
+        lifecycleScope.launch(Dispatchers.Default) {
+            ScripExtractor.preWarm()
+        }
 
         // Create Repository
         val database = AppDatabase.getDatabase(applicationContext)
@@ -140,28 +179,10 @@ class MainActivity : ComponentActivity() {
                     }
                 )
 
-                Scaffold(
-                    modifier = Modifier.fillMaxSize(),
-                    topBar = {
-                        CenterAlignedTopAppBar(
-                            title = {
-                                Text(
-                                    "Scrip Interceptor",
-                                    fontWeight = FontWeight.Bold,
-                                    letterSpacing = 0.5.sp
-                                )
-                            },
-                            colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(3.dp)
-                            )
-                        )
-                    }
-                ) { innerPadding ->
-                    DashboardScreen(
-                        viewModel = viewModel,
-                        modifier = Modifier.padding(innerPadding)
-                    )
-                }
+                DashboardScreen(
+                    viewModel = viewModel,
+                    modifier = Modifier.fillMaxSize()
+                )
             }
         }
     }
@@ -179,6 +200,14 @@ fun DashboardScreen(
     val watchlists by viewModel.watchlists.collectAsStateWithLifecycle()
     val selectedWatchlist by viewModel.selectedWatchlist.collectAsStateWithLifecycle()
     val scrips by viewModel.activeScrips.collectAsStateWithLifecycle()
+
+    val groupedScrips = remember(scrips) {
+        scrips.groupBy { it.scripName }.map { (name, list) ->
+            GroupedScrip(scripName = name, primaryScrip = list.first(), count = list.size)
+        }
+    }
+
+    var isEditMode by remember { mutableStateOf(false) }
 
     // Dialog state for adding a new watchlist
     var showAddWatchlistDialog by remember { mutableStateOf(false) }
@@ -237,13 +266,59 @@ fun DashboardScreen(
         }
     }
 
-    LazyColumn(
-        modifier = modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Image(
+                            painter = painterResource(id = R.drawable.img_app_logo),
+                            contentDescription = "App Logo",
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(RoundedCornerShape(8.dp)),
+                            contentScale = ContentScale.Crop
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            "Neo Watchlist Builder",
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.5.sp
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(3.dp)
+                ),
+                actions = {
+                    IconButton(
+                        onClick = {
+                            pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        },
+                        modifier = Modifier.testTag("scan_screenshot_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.DocumentScanner,
+                            contentDescription = "Scan Screenshot",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            )
+        }
+    ) { innerPadding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+                .padding(innerPadding)
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
         item {
             Spacer(modifier = Modifier.height(8.dp))
         }
@@ -333,54 +408,104 @@ fun DashboardScreen(
         // --- SECTION: ACTIVE SCRIPS LIST ---
         item {
             selectedWatchlist?.let { watchlist ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Column {
-                        Text(
-                            text = "${watchlist.name} Watchlist",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "List of active tracked NSE stocks",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp)
+                            .pointerInput(Unit) {
+                                detectTapGestures(
+                                    onLongPress = {
+                                        isEditMode = true
+                                    }
+                                )
+                            },
+                        horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        FilledTonalButton(
-                            onClick = {
-                                pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                            },
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                            modifier = Modifier
-                                .height(36.dp)
-                                .testTag("scan_screenshot_button")
-                        ) {
-                            Icon(Icons.Default.DocumentScanner, contentDescription = "Scan Screenshot", modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Scan Screen", fontSize = 12.sp)
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "${watchlist.name} Watchlist",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "List of active tracked NSE stocks",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
 
-                        Button(
-                            onClick = { showManualAddScripDialog = true },
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                            modifier = Modifier
-                                .height(36.dp)
-                                .testTag("manual_add_scrip_button")
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.Default.Add, contentDescription = "Add scrip", modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Add Stock", fontSize = 12.sp)
+                            Button(
+                                onClick = { showManualAddScripDialog = true },
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier
+                                    .height(36.dp)
+                                    .testTag("manual_add_scrip_button")
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = "Add scrip", modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Add Stock", fontSize = 12.sp)
+                            }
+                        }
+                    }
+
+                    if (isEditMode) {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.2f))
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Edit,
+                                        contentDescription = "Edit Mode",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Column {
+                                        Text(
+                                            text = "Editing Mode Active",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Text(
+                                            text = "Re-arrange with arrows or delete stocks",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                                        )
+                                    }
+                                }
+                                TextButton(
+                                    onClick = { isEditMode = false },
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(32.dp)
+                                ) {
+                                    Icon(Icons.Default.Check, contentDescription = "Done", modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Done", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
                         }
                     }
                 }
@@ -420,13 +545,25 @@ fun DashboardScreen(
                 }
             }
         } else {
-            items(scrips, key = { it.id }) { scrip ->
+            itemsIndexed(groupedScrips, key = { _, it -> it.primaryScrip.id }) { index, grouped ->
+                val scrip = grouped.primaryScrip
+                val count = grouped.count
+                val scripCategory = ScripExtractor.getScripCategory(scrip.scripName)
+                val stockInfo = ScripExtractor.findStockBySymbol(scrip.scripName)
+
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
                         .animateItem()
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onLongPress = {
+                                    isEditMode = true
+                                }
+                            )
+                        }
                         .testTag("scrip_item_${scrip.scripName}"),
-                    shape = RoundedCornerShape(12.dp),
+                    shape = RoundedCornerShape(16.dp),
                     colors = CardDefaults.cardColors(
                         containerColor = MaterialTheme.colorScheme.surface
                     ),
@@ -440,80 +577,223 @@ fun DashboardScreen(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Row(
+                            modifier = Modifier.weight(1.0f),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
+                            // Circular Avatar Logo with modern gradient background based on asset type
+                            val avatarGradient = when (scripCategory) {
+                                "Derivative" -> Brush.linearGradient(listOf(Color(0xFF0EA5E9), Color(0xFF2563EB))) // Sky-Blue
+                                "Commodity" -> Brush.linearGradient(listOf(Color(0xFFF59E0B), Color(0xFFD97706))) // Amber-Orange
+                                else -> Brush.linearGradient(listOf(Color(0xFF6366F1), Color(0xFFA855F7))) // Indigo-Purple
+                            }
                             Box(
                                 modifier = Modifier
-                                    .size(44.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
+                                    .size(48.dp)
+                                    .clip(CircleShape)
+                                    .background(avatarGradient),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.ShowChart,
-                                    contentDescription = "Stock Icon",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(24.dp)
+                                val firstChar = scrip.scripName.firstOrNull()?.toString() ?: ""
+                                Text(
+                                    text = firstChar,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color.White
                                 )
                             }
 
-                            Column {
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                // Scrip name is the header, full stock name is not needed
                                 Text(
                                     text = scrip.scripName,
-                                    style = MaterialTheme.typography.bodyLarge,
+                                    style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.Bold,
-                                    fontFamily = FontFamily.Monospace
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
+
+                                // Row for Badges: Category, MTF Leverage, Research, Duplicate
                                 Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    val scripCategory = ScripExtractor.getScripCategory(scrip.scripName)
-                                    val badgeBgColor = when (scripCategory) {
-                                        "Derivative" -> MaterialTheme.colorScheme.tertiaryContainer
-                                        "Commodity" -> Color(0xFFFFE082) // Light amber/gold for Commodity
-                                        else -> MaterialTheme.colorScheme.secondaryContainer
-                                    }
-                                    val badgeTextColor = when (scripCategory) {
-                                        "Derivative" -> MaterialTheme.colorScheme.onTertiaryContainer
-                                        "Commodity" -> Color(0xFF5D4037) // Dark brown for readability on gold
-                                        else -> MaterialTheme.colorScheme.onSecondaryContainer
-                                    }
-                                    Box(
-                                        modifier = Modifier
-                                            .background(
-                                                badgeBgColor,
-                                                RoundedCornerShape(4.dp)
+                                    // Asset class badge: Show only for Non-Equity
+                                    if (scripCategory != "Equity") {
+                                        val badgeBgColor = when (scripCategory) {
+                                            "Derivative" -> MaterialTheme.colorScheme.tertiaryContainer
+                                            "Commodity" -> Color(0xFFFFE082)
+                                            else -> MaterialTheme.colorScheme.secondaryContainer
+                                        }
+                                        val badgeTextColor = when (scripCategory) {
+                                            "Derivative" -> MaterialTheme.colorScheme.onTertiaryContainer
+                                            "Commodity" -> Color(0xFF5D4037)
+                                            else -> MaterialTheme.colorScheme.onSecondaryContainer
+                                        }
+                                        Box(
+                                            modifier = Modifier
+                                                .background(badgeBgColor, RoundedCornerShape(6.dp))
+                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                text = scripCategory,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = badgeTextColor,
+                                                fontSize = 8.sp
                                             )
-                                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                                    ) {
-                                        Text(
-                                            text = scripCategory,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = badgeTextColor,
-                                            fontSize = 9.sp
-                                        )
+                                        }
+                                    }
+
+                                    // MTF Leverage Badge (Color-coded) - Don't show if value is 0 or 1
+                                    if (scripCategory == "Equity") {
+                                        val mtfValue = stockInfo?.mtfKotak ?: 0
+                                        if (mtfValue > 1) {
+                                            val mtfBgColor = when (mtfValue) {
+                                                4 -> Color(0xFFDCFCE7) // Strong positive soft green
+                                                3 -> Color(0xFFF0FDF4) // Light soft green
+                                                2 -> Color(0xFFFEF3C7) // Warning soft yellow
+                                                else -> Color(0xFFF3F4F6) // Neutral soft grey
+                                            }
+                                            val mtfTextColor = when (mtfValue) {
+                                                4 -> Color(0xFF166534) // Deep green
+                                                3 -> Color(0xFF15803D) // Green
+                                                2 -> Color(0xFF92400E) // Deep amber
+                                                else -> Color(0xFF4B5563) // Dark slate grey
+                                            }
+                                            val mtfText = "${mtfValue}X MTF Available"
+
+                                            Box(
+                                                modifier = Modifier
+                                                    .background(mtfBgColor, RoundedCornerShape(6.dp))
+                                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                            ) {
+                                                Text(
+                                                    text = mtfText,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = mtfTextColor,
+                                                    fontSize = 8.sp
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    // Research Advisory Status Badge
+                                    val researchValue = stockInfo?.researchKotak ?: 3
+                                    if (researchValue == 1 || researchValue == 2) {
+                                        val researchBgColor = if (researchValue == 1) Color(0xFFDBEAFE) else Color(0xFFFEF3C7)
+                                        val researchTextColor = if (researchValue == 1) Color(0xFF1E40AF) else Color(0xFF92400E)
+                                        val researchText = if (researchValue == 1) "BUY" else "HOLD"
+
+                                        Box(
+                                            modifier = Modifier
+                                                .background(researchBgColor, RoundedCornerShape(6.dp))
+                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                text = researchText,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = researchTextColor,
+                                                fontSize = 8.sp
+                                            )
+                                        }
+                                    }
+
+                                    // Duplicate count indicator
+                                    if (count > 1) {
+                                        Box(
+                                            modifier = Modifier
+                                                .background(
+                                                    MaterialTheme.colorScheme.errorContainer,
+                                                    RoundedCornerShape(6.dp)
+                                                )
+                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                text = "added $count times",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                                fontSize = 8.sp
+                                            )
+                                        }
                                     }
                                 }
                             }
                         }
 
-                        IconButton(
-                            onClick = { viewModel.deleteScrip(scrip.id) },
-                            modifier = Modifier.testTag("delete_scrip_button_${scrip.scripName}")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Delete,
-                                contentDescription = "Delete scrip",
-                                tint = MaterialTheme.colorScheme.error
-                            )
+                        // Editing controls: Up/Down arrows and Delete (only visible in isEditMode)
+                        if (isEditMode) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                // Move Up button
+                                IconButton(
+                                    onClick = {
+                                        if (index > 0) {
+                                            val previousScrip = groupedScrips[index - 1].primaryScrip
+                                            viewModel.swapScrips(scrip, previousScrip)
+                                        }
+                                    },
+                                    enabled = index > 0,
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ArrowUpward,
+                                        contentDescription = "Move up",
+                                        tint = if (index > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+
+                                // Move Down button
+                                IconButton(
+                                    onClick = {
+                                        if (index < groupedScrips.size - 1) {
+                                            val nextScrip = groupedScrips[index + 1].primaryScrip
+                                            viewModel.swapScrips(scrip, nextScrip)
+                                        }
+                                    },
+                                    enabled = index < groupedScrips.size - 1,
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ArrowDownward,
+                                        contentDescription = "Move down",
+                                        tint = if (index < groupedScrips.size - 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+
+                                // Delete Button
+                                IconButton(
+                                    onClick = { viewModel.deleteScripByName(scrip.watchlistId, scrip.scripName) },
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .testTag("delete_scrip_button_${scrip.scripName}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "Delete scrip",
+                                        tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
             }
         }
+
+
 
         item {
             Spacer(modifier = Modifier.height(32.dp))
@@ -671,6 +951,7 @@ fun DashboardScreen(
                         items(filteredScrips) { stock ->
                             val isSelected = manualScripName == stock
                             val category = ScripExtractor.getScripCategory(stock)
+                            val searchStockInfo = ScripExtractor.findStockBySymbol(stock)
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -686,12 +967,27 @@ fun DashboardScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(
-                                    text = stock,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
-                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(
+                                        text = stock,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                    )
+                                    if (searchStockInfo != null) {
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "- ${searchStockInfo.companyName}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
                                 Box(
                                     modifier = Modifier
                                         .background(
@@ -782,8 +1078,32 @@ fun DashboardScreen(
                             verticalArrangement = Arrangement.Center,
                             modifier = Modifier.padding(16.dp)
                         ) {
-                            CircularProgressIndicator()
-                            Spacer(modifier = Modifier.height(16.dp))
+                            val infiniteTransition = rememberInfiniteTransition(label = "logo_scale")
+                            val scale by infiniteTransition.animateFloat(
+                                initialValue = 0.9f,
+                                targetValue = 1.1f,
+                                animationSpec = infiniteRepeatable(
+                                    animation = tween(1000, easing = FastOutSlowInEasing),
+                                    repeatMode = RepeatMode.Reverse
+                                ),
+                                label = "scale"
+                            )
+                            Image(
+                                painter = painterResource(id = R.drawable.img_app_logo),
+                                contentDescription = "Analyzing...",
+                                modifier = Modifier
+                                    .size(80.dp)
+                                    .graphicsLayer(scaleX = scale, scaleY = scale)
+                                    .clip(RoundedCornerShape(16.dp)),
+                                contentScale = ContentScale.Crop
+                            )
+                            Spacer(modifier = Modifier.height(20.dp))
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(24.dp),
+                                strokeWidth = 3.dp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
                             Text("Analyzing screenshot...", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     } else {
@@ -853,12 +1173,27 @@ fun DashboardScreen(
                                                 }
                                             )
                                             Spacer(modifier = Modifier.width(12.dp))
-                                            Text(
-                                                text = scrip,
-                                                style = MaterialTheme.typography.bodyLarge,
-                                                fontWeight = FontWeight.SemiBold,
-                                                modifier = Modifier.weight(1f)
-                                            )
+                                            val ocrStockInfo = ScripExtractor.findStockBySymbol(scrip)
+                                            Column(
+                                                modifier = Modifier.weight(1f),
+                                                verticalArrangement = Arrangement.Center
+                                            ) {
+                                                Text(
+                                                    text = scrip,
+                                                    style = MaterialTheme.typography.bodyLarge,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                                if (ocrStockInfo != null) {
+                                                    Text(
+                                                        text = ocrStockInfo.companyName,
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
+                                            }
+                                            Spacer(modifier = Modifier.width(8.dp))
                                             val category = ScripExtractor.getScripCategory(scrip)
                                             Box(
                                                 modifier = Modifier
@@ -923,6 +1258,5 @@ fun DashboardScreen(
             }
         )
     }
-
-
+}
 }

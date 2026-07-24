@@ -76,4 +76,53 @@ class ExampleUnitTest {
     assertFalse(extracted.contains("LT")) // LTCG should not extract L&T (LT)
     assertFalse(extracted.contains("GOLD")) // lowercase "gold standard" should not extract GOLD commodity
   }
+
+  @Test
+  fun testSvpAndLicSiblingStockBehavior() {
+    val article1 = """
+      Our SVP of Marketing spoke about the brand growth strategy and the corporate outlook.
+      The company shares are traded on NSE.
+    """.trimIndent()
+    val extracted1 = ScripExtractor.extractScripsFromText(article1)
+    assertFalse(extracted1.contains("SVPGLOB")) // Should NOT match SVPGLOB
+
+    val article2 = """
+      LIC reported a massive increase in quarterly profit. Shares of LIC ended 2% higher.
+    """.trimIndent()
+    val extracted2 = ScripExtractor.extractScripsFromText(article2)
+    assertTrue(extracted2.contains("LICI"))
+    assertFalse(extracted2.contains("LICHSGFIN")) // Should NOT match LIC Housing Finance
+
+    val article3 = """
+      LIC Housing Finance reported stable quarterly results. Shares of LIC Housing Finance rose 3%.
+    """.trimIndent()
+    val extracted3 = ScripExtractor.extractScripsFromText(article3)
+    assertTrue(extracted3.contains("LICHSGFIN"))
+  }
+
+  @Test
+  fun testDisclaimerExclusion() {
+    val article = """
+      HDFC Bank reported strong quarterly earnings with significant margin growth.
+      Disclaimer: The author or his relatives do not hold shares of Reliance Industries, SBI, or ICICI Bank. This is not a recommendation to buy or sell.
+    """.trimIndent()
+    val extracted = ScripExtractor.extractScripsFromText(article)
+    assertTrue(extracted.contains("HDFCBANK"))
+    assertFalse(extracted.contains("RELIANCE"))
+    assertFalse(extracted.contains("SBIN"))
+    assertFalse(extracted.contains("ICICIBANK"))
+  }
+
+  @Test
+  fun testLivemintArticleStocks() {
+    val article = """
+      Buy or sell: Ganesh Dongre of Anand Rathi recommends 3 stocks to buy today.
+      He recommends buying Bajaj Auto at current levels with a target of 10000.
+      He also suggests KFin Technologies as a strong buy, and Tata Steel as a solid pick.
+    """.trimIndent()
+    val extracted = ScripExtractor.extractScripsFromText(article)
+    assertTrue(extracted.contains("BAJAJ-AUTO"))
+    assertTrue(extracted.contains("KFINTECH"))
+    assertTrue(extracted.contains("TATASTEEL"))
+  }
 }

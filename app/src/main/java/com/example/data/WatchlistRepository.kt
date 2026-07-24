@@ -27,4 +27,12 @@ class WatchlistRepository(private val watchlistDao: WatchlistDao) {
     suspend fun deleteScrip(scripId: Int) {
         watchlistDao.deleteScrip(scripId)
     }
+
+    suspend fun deleteScripsByName(watchlistId: Int, scripName: String) {
+        watchlistDao.deleteScripsByName(watchlistId, scripName)
+    }
+
+    suspend fun updateScrip(scrip: ScripEntity) {
+        watchlistDao.insertScrip(scrip)
+    }
 }
